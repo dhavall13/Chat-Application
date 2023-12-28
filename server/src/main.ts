@@ -1,3 +1,4 @@
+import { randomUUID } from 'crypto'
 import dotenv from 'dotenv'
 import fastifyCors from '@fastify/cors'
 import fastify from 'fastify'
@@ -15,7 +16,7 @@ const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL
 const CONNECTION_COUNT_KEY = 'chat:connection-count'
 
 const CONNECTION_COUNT_UPDATED_CHANNEL = 'chat:connection-count-updated'
-// const NEW_MESSAGE_CHANNEL = "chat:new-message";
+const NEW_MESSAGE_CHANNEL = 'chat:new-message'
 
 if (!UPSTASH_REDIS_REST_URL) {
   console.error('missing UPSTASH_REDIS_REST_URL')
@@ -54,6 +55,17 @@ async function buildServer() {
       String(incrResult)
     )
 
+    io.on(NEW_MESSAGE_CHANNEL, async (payload: any) => {
+      const message = payload.message
+
+      if (!message) {
+        return
+      }
+
+      console.log('rest', message)
+      await publisher.publish(NEW_MESSAGE_CHANNEL, message.toString())
+    })
+
     io.on('disconnect', async () => {
       console.log('Client disconnected')
 
@@ -81,6 +93,15 @@ async function buildServer() {
     )
   })
 
+  subscriber.subscribe(NEW_MESSAGE_CHANNEL, (err, count) => {
+    if (err) {
+      console.error(`Error subscribing to ${NEW_MESSAGE_CHANNEL}`)
+      return
+    }
+
+    console.log(`${count} clients subscribes to ${NEW_MESSAGE_CHANNEL} channel`)
+  })
+
   subscriber.on('message', (channel, text) => {
     if (channel === CONNECTION_COUNT_UPDATED_CHANNEL) {
       app.io.emit(CONNECTION_COUNT_UPDATED_CHANNEL, {
@@ -90,15 +111,16 @@ async function buildServer() {
       return
     }
 
-    // if (channel === NEW_MESSAGE_CHANNEL) {
-    //   app.io.emit(NEW_MESSAGE_CHANNEL, {
-    //     message: text,
-    //     id: randomUUID(),
-    //     createdAt: new Date(),
-    //     port: PORT,
-    //   });
+    if (channel === NEW_MESSAGE_CHANNEL) {
+      app.io.emit(NEW_MESSAGE_CHANNEL, {
+        message: text,
+        id: randomUUID(),
+        createdAt: new Date(),
+        port: PORT,
+      })
 
-    // return;
+      return
+    }
   })
 
   app.get('/healthcheck', () => {
