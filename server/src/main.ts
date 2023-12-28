@@ -3,6 +3,7 @@ import fastifyCors from '@fastify/cors'
 import fastify from 'fastify'
 import fastifyIO from 'fastify-socket.io'
 import { Redis } from 'ioredis'
+import closeWithGrace from 'close-with-grace'
 
 dotenv.config()
 
@@ -13,7 +14,7 @@ const UPSTASH_REDIS_REST_URL = process.env.UPSTASH_REDIS_REST_URL
 
 const CONNECTION_COUNT_KEY = 'chat:connection-count'
 
-// const CONNECTION_COUNT_UPDATED_CHANNEL = "chat:connection-count-updated";
+const CONNECTION_COUNT_UPDATED_CHANNEL = 'chat:connection-count-updated'
 // const NEW_MESSAGE_CHANNEL = "chat:new-message";
 
 if (!UPSTASH_REDIS_REST_URL) {
@@ -23,6 +24,8 @@ if (!UPSTASH_REDIS_REST_URL) {
 
 const publisher = new Redis(UPSTASH_REDIS_REST_URL)
 const subscriber = new Redis(UPSTASH_REDIS_REST_URL)
+
+let connectedClients = 0
 
 async function buildServer() {
   const app = fastify()
@@ -42,13 +45,60 @@ async function buildServer() {
   app.io.on('connection', async (io: any) => {
     console.log('Client connected')
 
-    await publisher.incr(CONNECTION_COUNT_KEY)
+    const incrResult = await publisher.incr(CONNECTION_COUNT_KEY)
+
+    connectedClients++
+
+    await publisher.publish(
+      CONNECTION_COUNT_UPDATED_CHANNEL,
+      String(incrResult)
+    )
 
     io.on('disconnect', async () => {
       console.log('Client disconnected')
 
-      await publisher.decr(CONNECTION_COUNT_KEY)
+      connectedClients--
+
+      const decrResult = await publisher.decr(CONNECTION_COUNT_KEY)
+      await publisher.publish(
+        CONNECTION_COUNT_UPDATED_CHANNEL,
+        String(decrResult)
+      )
     })
+  })
+
+  subscriber.subscribe(CONNECTION_COUNT_UPDATED_CHANNEL, (err, count) => {
+    if (err) {
+      console.error(
+        `Error subscribing to ${CONNECTION_COUNT_UPDATED_CHANNEL}`,
+        err
+      )
+      return
+    }
+
+    console.log(
+      `${count} clients subscribes to ${CONNECTION_COUNT_UPDATED_CHANNEL} channel`
+    )
+  })
+
+  subscriber.on('message', (channel, text) => {
+    if (channel === CONNECTION_COUNT_UPDATED_CHANNEL) {
+      app.io.emit(CONNECTION_COUNT_UPDATED_CHANNEL, {
+        count: text,
+      })
+
+      return
+    }
+
+    // if (channel === NEW_MESSAGE_CHANNEL) {
+    //   app.io.emit(NEW_MESSAGE_CHANNEL, {
+    //     message: text,
+    //     id: randomUUID(),
+    //     createdAt: new Date(),
+    //     port: PORT,
+    //   });
+
+    // return;
   })
 
   app.get('/healthcheck', () => {
@@ -68,6 +118,22 @@ async function main() {
       port: PORT,
       host: HOST,
     })
+
+    closeWithGrace({ delay: 2000 }, async ({ signal, err }) => {
+      if (connectedClients > 0) {
+        const currentCount = parseInt(
+          (await publisher.get(CONNECTION_COUNT_KEY)) || '0',
+          10
+        )
+
+        const newCount = Math.max(currentCount - connectedClients, 0)
+
+        await publisher.set(CONNECTION_COUNT_KEY, newCount)
+      }
+
+      await app.close()
+    })
+
     console.log(`Server started at http://${HOST}:${PORT}`)
   } catch (e) {
     console.error(e)
